@@ -1,20 +1,29 @@
 package gitkit
 
 import (
+	"bytes"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"text/template"
+)
+
+var (
+	DefaultSSHBanner = `Welcome to gitkit {{ .Name }}
+Your public key id is {{ .Id }}
+`
 )
 
 type Config struct {
-	KeyDir     string       // Directory for server ssh keys. Only used in SSH strategy.
-	Dir        string       // Directory that contains repositories
-	GitPath    string       // Path to git binary
-	GitUser    string       // User for ssh connections
-	AutoCreate bool         // Automatically create repostories
-	AutoHooks  bool         // Automatically setup git hooks
-	Hooks      *HookScripts // Scripts for hooks/* directory
-	Auth       bool         // Require authentication
+	KeyDir         string       // Directory for server ssh keys. Only used in SSH strategy.
+	Dir            string       // Directory that contains repositories
+	GitPath        string       // Path to git binary
+	GitUser        string       // User for ssh connections
+	AutoCreate     bool         // Automatically create repostories
+	AutoHooks      bool         // Automatically setup git hooks
+	Hooks          *HookScripts // Scripts for hooks/* directory
+	Auth           bool         // Require authentication
+	BannerTemplate string       // text/template string to compile when a user tries to login via ssh, such as when verifying keys
 }
 
 // HookScripts represents all repository server-size git hooks
@@ -98,4 +107,24 @@ func (c *Config) setupHooks() error {
 	}
 
 	return nil
+}
+
+func (c Config) CompileBanner(pk PublicKey) (banner []byte, err error) {
+	tmpl := c.BannerTemplate
+
+	if tmpl == "" {
+		tmpl = DefaultSSHBanner
+	}
+
+	t, err := template.New("").Parse(tmpl)
+	if err != nil {
+		return
+	}
+
+	out := new(bytes.Buffer)
+
+	err = t.Execute(out, pk)
+	banner = out.Bytes()
+
+	return
 }
