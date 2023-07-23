@@ -127,7 +127,7 @@ func (s SSH) handleRequest(ctx context.Context, ch ssh.Channel, req *ssh.Request
 			log.Print(err)
 		}
 
-	default:
+	case "shell":
 		pk := ctx.Value(publicKeyContextKey{}).(PublicKey)
 
 		banner, err := s.config.CompileBanner(pk)
@@ -136,8 +136,11 @@ func (s SSH) handleRequest(ctx context.Context, ch ssh.Channel, req *ssh.Request
 		}
 
 		ch.Write(banner)
-	}
+		ch.Close()
 
+	default:
+		log.Printf("ssh: ignoring %s request", req.Type)
+	}
 }
 
 func (s SSH) handleEnvRequest(payload string) error {
