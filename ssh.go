@@ -2,6 +2,7 @@ package gitkit
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -31,6 +32,8 @@ type PublicKey struct {
 	Fingerprint string
 	Content     string
 }
+
+type publicKeyContextKey struct{}
 
 type SSH struct {
 	listener net.Listener
@@ -80,7 +83,7 @@ func execCommand(cmdname string, args ...string) (string, string, error) {
 	return string(bufOut), string(bufErr), err
 }
 
-func (s *SSH) handleConnection(keyID string, chans <-chan ssh.NewChannel) {
+func (s *SSH) handleConnection(ctx context.Context, chans <-chan ssh.NewChannel) {
 	for newChan := range chans {
 		if newChan.ChannelType() != "session" {
 			newChan.Reject(ssh.UnknownChannelType, "unknown channel type")
@@ -97,102 +100,125 @@ func (s *SSH) handleConnection(keyID string, chans <-chan ssh.NewChannel) {
 			defer ch.Close()
 
 			for req := range in {
-				payload := cleanCommand(string(req.Payload))
-
-				switch req.Type {
-				case "env":
-					log.Printf("ssh: incoming env request: %s\n", payload)
-
-					args := strings.Split(strings.Replace(payload, "\x00", "", -1), "\v")
-					if len(args) != 2 {
-						log.Printf("env: invalid env arguments: '%#v'", args)
-						continue
-					}
-
-					args[0] = strings.TrimLeft(args[0], "\x04")
-					if len(args[0]) == 0 {
-						log.Printf("env: invalid key from payload: %s", payload)
-						continue
-					}
-
-					_, _, err := execCommandBytes("env", args[0]+"="+args[1])
-					if err != nil {
-						log.Printf("env: %v", err)
-						return
-					}
-				case "exec":
-					log.Printf("ssh: incoming exec request: %s\n", payload)
-
-					cmdName := strings.TrimLeft(payload, "'()")
-					log.Printf("ssh: payload '%v'", cmdName)
-
-					if strings.HasPrefix(cmdName, "\x00") {
-						cmdName = strings.Replace(cmdName, "\x00", "", -1)[1:]
-					}
-
-					gitcmd, err := ParseGitCommand(cmdName)
-					if err != nil {
-						log.Println("ssh: error parsing command:", err)
-						ch.Write([]byte("Invalid command.\r\n"))
-						return
-					}
-
-					if !repoExists(filepath.Join(s.config.Dir, gitcmd.Repo)) && s.config.AutoCreate == true {
-						err := initRepo(gitcmd.Repo, s.config)
-						if err != nil {
-							logError("repo-init", err)
-							return
-						}
-					}
-
-					cmd := exec.Command(gitcmd.Command, gitcmd.Repo)
-					cmd.Dir = s.config.Dir
-					cmd.Env = append(os.Environ(), "GITKIT_KEY="+keyID)
-					// cmd.Env = append(os.Environ(), "SSH_ORIGINAL_COMMAND="+cmdName)
-
-					stdout, err := cmd.StdoutPipe()
-					if err != nil {
-						log.Printf("ssh: cant open stdout pipe: %v", err)
-						return
-					}
-
-					stderr, err := cmd.StderrPipe()
-					if err != nil {
-						log.Printf("ssh: cant open stderr pipe: %v", err)
-						return
-					}
-
-					input, err := cmd.StdinPipe()
-					if err != nil {
-						log.Printf("ssh: cant open stdin pipe: %v", err)
-						return
-					}
-
-					if err = cmd.Start(); err != nil {
-						log.Printf("ssh: start error: %v", err)
-						return
-					}
-
-					req.Reply(true, nil)
-					go io.Copy(input, ch)
-					io.Copy(ch, stdout)
-					io.Copy(ch.Stderr(), stderr)
-
-					if err = cmd.Wait(); err != nil {
-						log.Printf("ssh: command failed: %v", err)
-						return
-					}
-
-					ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
-					return
-				default:
-					ch.Write([]byte("Unsupported request type.\r\n"))
-					log.Println("ssh: unsupported req type:", req.Type)
-					return
-				}
+				s.handleRequest(ctx, ch, req)
 			}
+
 		}(reqs)
 	}
+}
+
+func (s SSH) handleRequest(ctx context.Context, ch ssh.Channel, req *ssh.Request) {
+	payload := cleanCommand(string(req.Payload))
+
+	switch req.Type {
+	case "env":
+		log.Printf("ssh: incoming env request: %s\n", payload)
+
+		err := s.handleEnvRequest(payload)
+		if err != nil {
+			log.Print(err)
+		}
+
+	case "exec":
+		log.Printf("ssh: incoming exec request: %s\n", payload)
+
+		err := s.handleExecRequest(ctx, ch, req, payload)
+		if err != nil {
+			log.Print(err)
+		}
+
+	default:
+		pk := ctx.Value(publicKeyContextKey{}).(PublicKey)
+
+		banner, err := s.config.CompileBanner(pk)
+		if err != nil {
+			log.Print(err)
+		}
+
+		ch.Write(banner)
+	}
+
+}
+
+func (s SSH) handleEnvRequest(payload string) error {
+	args := strings.Split(strings.Replace(payload, "\x00", "", -1), "\v")
+	if len(args) != 2 {
+		return fmt.Errorf("env: invalid env arguments: '%#v'", args)
+	}
+
+	args[0] = strings.TrimLeft(args[0], "\x04")
+	if len(args[0]) == 0 {
+		return fmt.Errorf("env: invalid key from payload: %s", payload)
+	}
+
+	_, _, err := execCommandBytes("env", args[0]+"="+args[1])
+	if err != nil {
+		log.Printf("env: %v", err)
+	}
+
+	return err
+}
+
+func (s SSH) handleExecRequest(ctx context.Context, ch ssh.Channel, req *ssh.Request, payload string) (err error) {
+	cmdName := strings.TrimLeft(payload, "'()")
+	log.Printf("ssh: payload '%v'", cmdName)
+
+	if strings.HasPrefix(cmdName, "\x00") {
+		cmdName = strings.Replace(cmdName, "\x00", "", -1)[1:]
+	}
+
+	gitcmd, err := ParseGitCommand(cmdName)
+	if err != nil {
+		ch.Write([]byte("Invalid command.\r\n"))
+
+		return err
+	}
+
+	if !repoExists(filepath.Join(s.config.Dir, gitcmd.Repo)) && s.config.AutoCreate == true {
+		err = initRepo(gitcmd.Repo, s.config)
+		if err != nil {
+			return
+		}
+	}
+
+	keyID := ctx.Value(publicKeyContextKey{}).(PublicKey).Id
+
+	cmd := exec.Command(gitcmd.Command, gitcmd.Repo)
+	cmd.Dir = s.config.Dir
+	cmd.Env = append(os.Environ(), "GITKIT_KEY="+keyID)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("ssh: cant open stdout pipe: %w", err)
+	}
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("ssh: cant open stderr pipe: %w", err)
+	}
+
+	input, err := cmd.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("ssh: cant open stdin pipe: %w", err)
+	}
+
+	if err = cmd.Start(); err != nil {
+		return fmt.Errorf("ssh: start error: %w", err)
+	}
+
+	req.Reply(true, nil)
+
+	go io.Copy(input, ch)
+	io.Copy(ch, stdout)
+	io.Copy(ch.Stderr(), stderr)
+
+	if err = cmd.Wait(); err != nil {
+		return fmt.Errorf("ssh: command failed: %w", err)
+	}
+
+	ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+
+	return
 }
 
 func (s *SSH) createServerKey() error {
@@ -234,6 +260,7 @@ func (s *SSH) setup() error {
 	if s.sshconfig != nil {
 		return nil
 	}
+
 	config := &ssh.ServerConfig{
 		ServerVersion: fmt.Sprintf("SSH-2.0-gitkit %s", Version),
 	}
@@ -259,7 +286,7 @@ func (s *SSH) setup() error {
 				return nil, fmt.Errorf("auth handler did not return a key")
 			}
 
-			return &ssh.Permissions{Extensions: map[string]string{"key-id": pkey.Id}}, nil
+			return &ssh.Permissions{Extensions: map[string]string{"key-id": pkey.Id, "key-name": pkey.Name}}, nil
 		}
 	}
 
@@ -339,13 +366,16 @@ func (s *SSH) Serve() error {
 				return
 			}
 
-			keyId := ""
+			var pk PublicKey
 			if sConn.Permissions != nil {
-				keyId = sConn.Permissions.Extensions["key-id"]
+				pk.Name = sConn.Permissions.Extensions["key-name"]
+				pk.Id = sConn.Permissions.Extensions["key-id"]
 			}
 
+			ctx := context.WithValue(context.Background(), publicKeyContextKey{}, pk)
+
 			go ssh.DiscardRequests(reqs)
-			go s.handleConnection(keyId, chans)
+			go s.handleConnection(ctx, chans)
 		}()
 	}
 }
