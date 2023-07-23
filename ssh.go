@@ -127,6 +127,8 @@ func (s SSH) handleRequest(ctx context.Context, ch ssh.Channel, req *ssh.Request
 			log.Print(err)
 		}
 
+		ch.Close()
+
 	case "shell":
 		pk := ctx.Value(publicKeyContextKey{}).(PublicKey)
 
@@ -219,7 +221,7 @@ func (s SSH) handleExecRequest(ctx context.Context, ch ssh.Channel, req *ssh.Req
 		return fmt.Errorf("ssh: command failed: %w", err)
 	}
 
-	ch.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
+	_, err = ch.SendRequest("exit-status", true, []byte{0, 0, 0, 0})
 
 	return
 }
