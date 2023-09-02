@@ -23,8 +23,14 @@ func ParseGitCommand(cmd string) (*GitCommand, error) {
 	result := &GitCommand{
 		Original: cmd,
 		Command:  matches[0][1],
-		Repo:     strings.Replace(matches[0][2], "/", "", 1),
+		Repo:     parseRepoName(matches[0][2]),
 	}
 
 	return result, nil
+}
+
+func parseRepoName(s string) (repoName string) {
+	repoName, _ = strings.CutSuffix(strings.Replace(s, "/", "", 1), ".git")
+
+	return
 }

@@ -8,14 +8,15 @@ import (
 
 func TestParseGitCommand(t *testing.T) {
 	examples := map[string]GitCommand{
-		"git-upload-pack 'hello.git'":        {"git-upload-pack", "hello.git", "git-upload-pack 'hello.git'"},
-		"git upload-pack 'hello.git'":        {"git upload-pack", "hello.git", "git upload-pack 'hello.git'"},
-		"git-upload-pack '/hello.git'":       {"git-upload-pack", "hello.git", "git-upload-pack 'hello.git'"},
-		"git-upload-pack '/hello/world.git'": {"git-upload-pack", "hello/world.git", "git-upload-pack 'hello.git'"},
-		"git-receive-pack 'hello.git'":       {"git-receive-pack", "hello.git", "git-receive-pack 'hello.git'"},
-		"git receive-pack 'hello.git'":       {"git receive-pack", "hello.git", "git receive-pack 'hello.git'"},
-		"git-upload-archive 'hello.git'":     {"git-upload-archive", "hello.git", "git-upload-archive 'hello.git'"},
-		"git upload-archive 'hello.git'":     {"git upload-archive", "hello.git", "git upload-archive 'hello.git'"},
+		"git-upload-pack 'hello.git'":        {"git-upload-pack", "hello", "git-upload-pack 'hello.git'"},
+		"git upload-pack 'hello.git'":        {"git upload-pack", "hello", "git upload-pack 'hello.git'"},
+		"git-upload-pack '/hello.git'":       {"git-upload-pack", "hello", "git-upload-pack 'hello.git'"},
+		"git-upload-pack '/hello/world.git'": {"git-upload-pack", "hello/world", "git-upload-pack 'hello.git'"},
+		"git-receive-pack 'hello.git'":       {"git-receive-pack", "hello", "git-receive-pack 'hello.git'"},
+		"git receive-pack 'hello.git'":       {"git receive-pack", "hello", "git receive-pack 'hello.git'"},
+		"git-upload-archive 'hello.git'":     {"git-upload-archive", "hello", "git-upload-archive 'hello.git'"},
+		"git upload-archive 'hello.git'":     {"git upload-archive", "hello", "git upload-archive 'hello.git'"},
+		"git upload-archive 'hello'":         {"git upload-archive", "hello", "git upload-archive 'hello.git'"},
 	}
 
 	for s, expected := range examples {
