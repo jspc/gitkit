@@ -2,7 +2,6 @@ package gitkit
 
 import (
 	"bytes"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"text/template"
@@ -43,7 +42,7 @@ func (c *HookScripts) setupInDir(path string) error {
 	}
 
 	// Cleanup any existing hooks first
-	hookFiles, err := ioutil.ReadDir(basePath)
+	hookFiles, err := os.ReadDir(basePath)
 	if err == nil {
 		for _, file := range hookFiles {
 			if err := os.Remove(filepath.Join(basePath, file.Name())); err != nil {
@@ -61,7 +60,7 @@ func (c *HookScripts) setupInDir(path string) error {
 			continue
 		}
 
-		if err := ioutil.WriteFile(fullPath, []byte(script), 0755); err != nil {
+		if err := os.WriteFile(fullPath, []byte(script), 0755); err != nil {
 			logError("hook-update", err)
 			return err
 		}
@@ -81,7 +80,7 @@ func (c *Config) Setup() error {
 		}
 	}
 
-	if c.AutoHooks == true {
+	if c.AutoHooks {
 		return c.setupHooks()
 	}
 
@@ -89,7 +88,7 @@ func (c *Config) Setup() error {
 }
 
 func (c *Config) setupHooks() error {
-	files, err := ioutil.ReadDir(c.Dir)
+	files, err := os.ReadDir(c.Dir)
 	if err != nil {
 		return err
 	}

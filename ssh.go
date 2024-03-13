@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -24,6 +23,7 @@ import (
 var (
 	ErrAlreadyStarted = errors.New("server has already been started")
 	ErrNoListener     = errors.New("cannot call Serve() before Listen()")
+	ErrIncorrectUser  = errors.New("unrecognised/ invalid user")
 )
 
 type PublicKey struct {
@@ -33,14 +33,24 @@ type PublicKey struct {
 	Content     string
 }
 
-type publicKeyContextKey struct{}
+type PublicKeyContextKey struct{}
+type UserContextKey struct{}
+
+const (
+	keyID   = "key-id"
+	keyName = "key-name"
+	sshUser = "ssh-user"
+)
 
 type SSH struct {
 	listener net.Listener
 
-	sshconfig           *ssh.ServerConfig
-	config              *Config
-	PublicKeyLookupFunc func(string) (*PublicKey, error)
+	sshconfig *ssh.ServerConfig
+	config    *Config
+
+	PublicKeyLookupFunc    func(ctx context.Context, publicKeyPayload string) (*PublicKey, error)
+	PreLoginFunc           func(ctx context.Context, metadata ssh.ConnMetadata) error
+	AuthoriseOperationFunc func(ctx context.Context, cmd *GitCommand) error
 }
 
 func NewSSH(config Config) *SSH {
@@ -76,11 +86,6 @@ func execCommandBytes(cmdname string, args ...string) ([]byte, []byte, error) {
 
 	err := cmd.Run()
 	return bufOut.Bytes(), bufErr.Bytes(), err
-}
-
-func execCommand(cmdname string, args ...string) (string, string, error) {
-	bufOut, bufErr, err := execCommandBytes(cmdname, args...)
-	return string(bufOut), string(bufErr), err
 }
 
 func (s *SSH) handleConnection(ctx context.Context, chans <-chan ssh.NewChannel) {
@@ -130,7 +135,7 @@ func (s SSH) handleRequest(ctx context.Context, ch ssh.Channel, req *ssh.Request
 		ch.Close()
 
 	case "shell":
-		pk := ctx.Value(publicKeyContextKey{}).(PublicKey)
+		pk := ctx.Value(PublicKeyContextKey{}).(PublicKey)
 
 		banner, err := s.config.CompileBanner(pk)
 		if err != nil {
@@ -179,14 +184,21 @@ func (s SSH) handleExecRequest(ctx context.Context, ch ssh.Channel, req *ssh.Req
 		return err
 	}
 
-	if !repoExists(filepath.Join(s.config.Dir, gitcmd.Repo)) && s.config.AutoCreate == true {
+	if s.AuthoriseOperationFunc != nil {
+		err = s.AuthoriseOperationFunc(ctx, gitcmd)
+		if err != nil {
+			return
+		}
+	}
+
+	if !repoExists(filepath.Join(s.config.Dir, gitcmd.Repo)) && s.config.AutoCreate {
 		err = initRepo(gitcmd.Repo, s.config)
 		if err != nil {
 			return
 		}
 	}
 
-	keyID := ctx.Value(publicKeyContextKey{}).(PublicKey).Id
+	keyID := ctx.Value(PublicKeyContextKey{}).(PublicKey).Id
 
 	cmd := exec.Command(gitcmd.Command, gitcmd.Repo)
 	cmd.Dir = s.config.Dir
@@ -258,7 +270,17 @@ func (s *SSH) createServerKey() error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(pubKeyPath, ssh.MarshalAuthorizedKey(pub), 0644)
+	return os.WriteFile(pubKeyPath, ssh.MarshalAuthorizedKey(pub), 0644)
+}
+
+func (s SSH) defaultPreLoginFunc(ctx context.Context, metadata ssh.ConnMetadata) error {
+	u := metadata.User()
+
+	if s.config.Auth && s.config.GitUser != "" && u != s.config.GitUser {
+		return ErrIncorrectUser
+	}
+
+	return nil
 }
 
 func (s *SSH) setup() error {
@@ -281,8 +303,20 @@ func (s *SSH) setup() error {
 			return fmt.Errorf("public key lookup func is not provided")
 		}
 
+		if s.PreLoginFunc == nil {
+			s.PreLoginFunc = s.defaultPreLoginFunc
+		}
+
 		config.PublicKeyCallback = func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			pkey, err := s.PublicKeyLookupFunc(strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
+			ctx := context.WithValue(context.Background(), UserContextKey{}, conn.User())
+			err := s.PreLoginFunc(ctx, conn)
+			if err != nil {
+				return nil, err
+			}
+
+			log.Print(err)
+
+			pkey, err := s.PublicKeyLookupFunc(ctx, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
 			if err != nil {
 				return nil, err
 			}
@@ -291,7 +325,7 @@ func (s *SSH) setup() error {
 				return nil, fmt.Errorf("auth handler did not return a key")
 			}
 
-			return &ssh.Permissions{Extensions: map[string]string{"key-id": pkey.Id, "key-name": pkey.Name}}, nil
+			return &ssh.Permissions{Extensions: map[string]string{keyID: pkey.Id, keyName: pkey.Name, sshUser: conn.User()}}, nil
 		}
 	}
 
@@ -302,7 +336,7 @@ func (s *SSH) setup() error {
 		}
 	}
 
-	privateBytes, err := ioutil.ReadFile(keypath)
+	privateBytes, err := os.ReadFile(keypath)
 	if err != nil {
 		return err
 	}
@@ -366,18 +400,19 @@ func (s *SSH) Serve() error {
 
 			log.Printf("ssh: connection from %s (%s)", sConn.RemoteAddr(), sConn.ClientVersion())
 
-			if s.config.Auth && s.config.GitUser != "" && sConn.User() != s.config.GitUser {
-				sConn.Close()
-				return
-			}
+			var (
+				pk      PublicKey
+				gitUser string
+			)
 
-			var pk PublicKey
 			if sConn.Permissions != nil {
-				pk.Name = sConn.Permissions.Extensions["key-name"]
-				pk.Id = sConn.Permissions.Extensions["key-id"]
+				pk.Name = sConn.Permissions.Extensions[keyName]
+				pk.Id = sConn.Permissions.Extensions[keyID]
+				gitUser = sConn.Permissions.Extensions[sshUser]
 			}
 
-			ctx := context.WithValue(context.Background(), publicKeyContextKey{}, pk)
+			ctx := context.WithValue(context.Background(), PublicKeyContextKey{}, pk)
+			ctx = context.WithValue(ctx, UserContextKey{}, gitUser)
 
 			go ssh.DiscardRequests(reqs)
 			go s.handleConnection(ctx, chans)
