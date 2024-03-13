@@ -30,7 +30,8 @@ func ParseGitCommand(cmd string) (*GitCommand, error) {
 }
 
 func parseRepoName(s string) (repoName string) {
-	repoName, _ = strings.CutSuffix(strings.Replace(s, "/", "", 1), ".git")
+	repoPath, _ := strings.CutPrefix(s, "/")
+	repoName, _ = strings.CutSuffix(repoPath, ".git")
 
 	return
 }
