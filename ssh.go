@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
@@ -87,11 +86,6 @@ func execCommandBytes(cmdname string, args ...string) ([]byte, []byte, error) {
 
 	err := cmd.Run()
 	return bufOut.Bytes(), bufErr.Bytes(), err
-}
-
-func execCommand(cmdname string, args ...string) (string, string, error) {
-	bufOut, bufErr, err := execCommandBytes(cmdname, args...)
-	return string(bufOut), string(bufErr), err
 }
 
 func (s *SSH) handleConnection(ctx context.Context, chans <-chan ssh.NewChannel) {
@@ -197,7 +191,7 @@ func (s SSH) handleExecRequest(ctx context.Context, ch ssh.Channel, req *ssh.Req
 		}
 	}
 
-	if !repoExists(filepath.Join(s.config.Dir, gitcmd.Repo)) && s.config.AutoCreate == true {
+	if !repoExists(filepath.Join(s.config.Dir, gitcmd.Repo)) && s.config.AutoCreate {
 		err = initRepo(gitcmd.Repo, s.config)
 		if err != nil {
 			return
@@ -276,12 +270,11 @@ func (s *SSH) createServerKey() error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(pubKeyPath, ssh.MarshalAuthorizedKey(pub), 0644)
+	return os.WriteFile(pubKeyPath, ssh.MarshalAuthorizedKey(pub), 0644)
 }
 
 func (s SSH) defaultPreLoginFunc(ctx context.Context, metadata ssh.ConnMetadata) error {
 	u := metadata.User()
-	ctx = context.WithValue(ctx, UserContextKey{}, u)
 
 	if s.config.Auth && s.config.GitUser != "" && u != s.config.GitUser {
 		return ErrIncorrectUser
@@ -343,7 +336,7 @@ func (s *SSH) setup() error {
 		}
 	}
 
-	privateBytes, err := ioutil.ReadFile(keypath)
+	privateBytes, err := os.ReadFile(keypath)
 	if err != nil {
 		return err
 	}
