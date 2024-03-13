@@ -35,6 +35,7 @@ type PublicKey struct {
 
 type PublicKeyContextKey struct{}
 type UserContextKey struct{}
+type RepositoryContextKey struct{}
 
 const (
 	keyID   = "key-id"
@@ -51,6 +52,7 @@ type SSH struct {
 	PublicKeyLookupFunc    func(ctx context.Context, publicKeyPayload string) (*PublicKey, error)
 	PreLoginFunc           func(ctx context.Context, metadata ssh.ConnMetadata) error
 	AuthoriseOperationFunc func(ctx context.Context, cmd *GitCommand) error
+	FinaliseFunc           func(ctx context.Context)
 }
 
 func NewSSH(config Config) *SSH {
@@ -233,6 +235,9 @@ func (s SSH) handleExecRequest(ctx context.Context, ch ssh.Channel, req *ssh.Req
 		return fmt.Errorf("ssh: command failed: %w", err)
 	}
 
+	ctx = context.WithValue(ctx, RepositoryContextKey{}, gitcmd)
+	s.FinaliseFunc(ctx)
+
 	_, err = ch.SendRequest("exit-status", true, []byte{0, 0, 0, 0})
 
 	return
@@ -283,6 +288,10 @@ func (s SSH) defaultPreLoginFunc(ctx context.Context, metadata ssh.ConnMetadata)
 	return nil
 }
 
+func (s SSH) defaultFinaliseFunc(ctx context.Context) {
+	return
+}
+
 func (s *SSH) setup() error {
 	if s.sshconfig != nil {
 		return nil
@@ -305,6 +314,10 @@ func (s *SSH) setup() error {
 
 		if s.PreLoginFunc == nil {
 			s.PreLoginFunc = s.defaultPreLoginFunc
+		}
+
+		if s.FinaliseFunc == nil {
+			s.FinaliseFunc = s.defaultFinaliseFunc
 		}
 
 		config.PublicKeyCallback = func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
